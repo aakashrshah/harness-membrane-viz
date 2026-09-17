@@ -9,6 +9,7 @@ interface Props {
   harnessType: HarnessType;
   ripple: number; // 0–1 spike on breach
   clamp: number; // visual tightness
+  flash?: "none" | "block" | "allow" | "rewrite";
 }
 
 const vertexShader = /* glsl */ `
@@ -42,6 +43,7 @@ uniform vec3 uColorB;
 uniform vec3 uAccent;
 uniform float uGrid;
 uniform float uMode; // 0 kernel, 1 test, 2 domain
+uniform float uFlash; // 0 none, 1 block, 2 allow, 3 rewrite
 varying vec2 vUv;
 varying float vElevation;
 varying vec3 vWorld;
@@ -75,6 +77,15 @@ void main() {
     vec2 c2 = uv - vec2(0.7, 0.4);
     float island = smoothstep(0.18, 0.08, length(c1)) + smoothstep(0.15, 0.06, length(c2));
     col = mix(col, mix(uColorB, uAccent, 0.5), island * 0.55);
+  }
+
+  // Verdict flash — red/amber block vs allow glow
+  if (uFlash > 0.5 && uFlash < 1.5) {
+    col = mix(col, vec3(1.0, 0.25, 0.35), 0.45 + uRipple * 0.25);
+  } else if (uFlash > 1.5 && uFlash < 2.5) {
+    col = mix(col, vec3(0.4, 1.0, 0.65), 0.4);
+  } else if (uFlash > 2.5) {
+    col = mix(col, vec3(1.0, 0.85, 0.3), 0.4);
   }
 
   float alpha = 0.22 + g1 * 0.35 + g2 * 0.15 + fres * 0.25 + uRipple * 0.2;
@@ -114,8 +125,20 @@ function harnessPalette(type: HarnessType) {
   };
 }
 
+function flashToUniform(flash: Props["flash"]): number {
+  if (flash === "block") return 1;
+  if (flash === "allow") return 2;
+  if (flash === "rewrite") return 3;
+  return 0;
+}
+
 /** Lit water/membrane control plane — material varies by harness type. */
-export function HarnessMembrane({ harnessType, ripple, clamp }: Props) {
+export function HarnessMembrane({
+  harnessType,
+  ripple,
+  clamp,
+  flash = "none",
+}: Props) {
   const mesh = useRef<THREE.Mesh>(null);
   const palette = useMemo(() => harnessPalette(harnessType), [harnessType]);
 
@@ -129,6 +152,7 @@ export function HarnessMembrane({ harnessType, ripple, clamp }: Props) {
       uAccent: { value: palette.accent },
       uGrid: { value: palette.grid * clamp },
       uMode: { value: palette.mode },
+      uFlash: { value: 0 },
     }),
     [palette, clamp]
   );
@@ -146,6 +170,11 @@ export function HarnessMembrane({ harnessType, ripple, clamp }: Props) {
     uniforms.uColorB.value.copy(palette.b);
     uniforms.uAccent.value.copy(palette.accent);
     uniforms.uMode.value = palette.mode;
+    uniforms.uFlash.value = THREE.MathUtils.lerp(
+      uniforms.uFlash.value,
+      flashToUniform(flash),
+      0.2
+    );
   });
 
   const segs = harnessType === "kernel" ? 96 : harnessType === "test" ? 72 : 64;
@@ -169,9 +198,17 @@ export function HarnessMembrane({ harnessType, ripple, clamp }: Props) {
       <mesh position={[0, 0, -0.05]}>
         <planeGeometry args={[10, 10]} />
         <meshBasicMaterial
-          color={palette.accent}
+          color={
+            flash === "block"
+              ? "#ff4d6d"
+              : flash === "allow"
+                ? "#7dffb3"
+                : flash === "rewrite"
+                  ? "#ffe066"
+                  : palette.accent
+          }
           transparent
-          opacity={0.04 + ripple * 0.08}
+          opacity={0.04 + ripple * 0.08 + (flash !== "none" ? 0.1 : 0)}
           depthWrite={false}
         />
       </mesh>
