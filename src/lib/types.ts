@@ -9,7 +9,18 @@ export type AgentDepth =
 /** Harness membrane material / control plane style */
 export type HarnessType = "kernel" | "test" | "domain";
 
-/** Scenario presets for the mock stream */
+/** Camera viewing mode */
+export type CameraMode = "under" | "side";
+
+/** Light intent classes inferred from free-form prompts */
+export type IntentId =
+  | "benign"
+  | "egress-pii"
+  | "jailbreak"
+  | "tool-overreach"
+  | "skill-plan";
+
+/** Scenario presets (chips only fill the textarea) */
 export type ScenarioId =
   | "constrained"
   | "tool-overreach"
@@ -25,6 +36,8 @@ export type StreamEventType =
   | "tool_propose"
   | "harness_check"
   | "trajectory"
+  | "test_assert"
+  | "control_gate"
   | "done";
 
 export interface BaseStreamEvent {
@@ -56,6 +69,8 @@ export interface HarnessCheckEvent extends BaseStreamEvent {
   tool?: string;
   verdict: HarnessVerdict;
   reason: string;
+  /** Short label for Attempt vs Control strip */
+  attempt?: string;
 }
 
 export interface TrajectoryEvent extends BaseStreamEvent {
@@ -64,6 +79,19 @@ export interface TrajectoryEvent extends BaseStreamEvent {
   from?: [number, number, number];
   to?: [number, number, number];
   color?: string;
+}
+
+export interface TestAssertEvent extends BaseStreamEvent {
+  type: "test_assert";
+  name: string;
+  result: "pass" | "fail";
+  reason: string;
+}
+
+export interface ControlGateEvent extends BaseStreamEvent {
+  type: "control_gate";
+  name: string;
+  state: "idle" | "checking" | "pass" | "fail" | "active";
 }
 
 export interface DoneEvent extends BaseStreamEvent {
@@ -77,6 +105,8 @@ export type StreamEvent =
   | ToolProposeEvent
   | HarnessCheckEvent
   | TrajectoryEvent
+  | TestAssertEvent
+  | ControlGateEvent
   | DoneEvent;
 
 export interface MockStreamRequest {
@@ -104,9 +134,60 @@ export const AGENT_DEPTH_ORDER: AgentDepth[] = [
 
 export const HARNESS_LABELS: Record<HarnessType, string> = {
   kernel: "Kernel",
-  test: "Test",
+  test: "Test harness",
   domain: "Domain-specific",
 };
+
+/** Usual harness controls mapped to membrane gate cues */
+export const USUAL_CONTROLS: { name: string; cue: string }[] = [
+  { name: "Allowlists", cue: "gate nodes — only approved tools light green" },
+  { name: "Tool gates", cue: "check pulse before any tool arc crosses" },
+  { name: "Output validators", cue: "rewrite glow when text is rewritten" },
+  { name: "Policy checks", cue: "amber flash on policy hit" },
+  { name: "Budgets / timeouts", cue: "outer ring dims as budget spends" },
+  { name: "Human approval", cue: "hold marker until gate clears" },
+];
+
+export const HARNESS_PEDAGOGY: Record<
+  HarnessType,
+  { oneLiner: string; bullets: string[] }
+> = {
+  kernel: {
+    oneLiner:
+      "OS-like control plane: densest grid, hard allowlists, tightest clamp.",
+    bullets: [
+      "Syscall-style tool gates — unlisted tools never cross.",
+      "Self-modification and harness disable attempts are hard-blocked.",
+      "Cool blue material = maximum membrane tension.",
+    ],
+  },
+  test: {
+    oneLiner:
+      "Assertion suite as membrane rails — every attempt is checked and scored.",
+    bullets: [
+      "Labeled assertion lanes: schema, PII, allowlist, budget.",
+      "Pass = yellow/green tick on the rail; fail = blocked trajectory.",
+      "HUD Test results lists the full suite for the run.",
+    ],
+  },
+  domain: {
+    oneLiner:
+      "Business/domain islands — softer clamp with policy pockets.",
+    bullets: [
+      "Constraint islands permit finance/ops paths, reject others.",
+      "Rewrites common: strip PII, force aggregates.",
+      "Mixed blue/yellow accents mark domain boundaries.",
+    ],
+  },
+};
+
+/** Default assertion suite shown as rails on the Test membrane */
+export const TEST_ASSERTION_LANES = [
+  "schema valid",
+  "no PII egress",
+  "tool allowlist",
+  "budget",
+] as const;
 
 export const SCENARIO_PRESETS: {
   id: ScenarioId;

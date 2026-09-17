@@ -4,23 +4,27 @@ import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ControlDock } from "./ControlDock";
 import { EventHUD } from "./EventHUD";
-import { OnboardingTip } from "./OnboardingTip";
+import { PedagogyPanel } from "./PedagogyPanel";
 import { eventBus } from "@/lib/event-bus";
 import { pauseStream, startMockStream } from "@/lib/stream-client";
-import type { AgentDepth, HarnessType, ScenarioId } from "@/lib/types";
+import type {
+  AgentDepth,
+  CameraMode,
+  HarnessType,
+  ScenarioId,
+} from "@/lib/types";
 
-const Scene = dynamic(
-  () => import("./Scene").then((m) => m.Scene),
-  { ssr: false, loading: () => <div className="absolute inset-0 bg-[#03050a]" /> }
-);
+const Scene = dynamic(() => import("./Scene").then((m) => m.Scene), {
+  ssr: false,
+  loading: () => <div className="absolute inset-0 bg-[#03050a]" />,
+});
 
 export function VizApp() {
-  const [prompt, setPrompt] = useState(
-    "Summarize Q3 revenue drivers within approved data sources."
-  );
+  const [prompt, setPrompt] = useState("");
   const [agentDepth, setAgentDepth] = useState<AgentDepth>("deep-tools");
   const [harnessType, setHarnessType] = useState<HarnessType>("kernel");
-  const [scenario, setScenario] = useState<ScenarioId>("constrained");
+  const [scenario, setScenario] = useState<ScenarioId>("custom");
+  const [cameraMode, setCameraMode] = useState<CameraMode>("under");
   const [playing, setPlaying] = useState(false);
   const [scrub, setScrub] = useState(-1);
   const [historyLen, setHistoryLen] = useState(0);
@@ -51,7 +55,12 @@ export function VizApp() {
     setPlaying(true);
     try {
       await startMockStream(
-        { prompt, agentDepth, harnessType, scenario },
+        {
+          prompt: prompt.trim() || "Hello — show me a constrained run.",
+          agentDepth,
+          harnessType,
+          scenario,
+        },
         ac.signal
       );
     } catch (e) {
@@ -79,11 +88,15 @@ export function VizApp() {
 
   return (
     <div className="relative h-dvh w-full overflow-hidden bg-[#03050a] text-white">
-      <Scene agentDepth={agentDepth} harnessType={harnessType} />
+      <Scene
+        agentDepth={agentDepth}
+        harnessType={harnessType}
+        cameraMode={cameraMode}
+      />
 
-      <div className="pointer-events-none absolute inset-0 z-10 bg-gradient-to-b from-black/40 via-transparent to-black/50" />
+      <div className="pointer-events-none absolute inset-0 z-10 bg-gradient-to-b from-black/45 via-transparent to-black/55" />
 
-      <OnboardingTip />
+      <PedagogyPanel harnessType={harnessType} />
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-stretch justify-between gap-4 p-4 md:flex-row md:items-end">
         <ControlDock
@@ -95,6 +108,8 @@ export function VizApp() {
           setHarnessType={setHarnessType}
           scenario={scenario}
           setScenario={setScenario}
+          cameraMode={cameraMode}
+          setCameraMode={setCameraMode}
           playing={playing}
           scrub={scrub}
           historyLen={historyLen}
@@ -102,11 +117,13 @@ export function VizApp() {
           onPause={onPause}
           onScrub={onScrub}
         />
-        <EventHUD />
+        <EventHUD showTestResults={harnessType === "test"} />
       </div>
 
-      <footer className="pointer-events-none absolute right-4 top-4 z-20 text-right text-[10px] text-white/30">
+      <footer className="pointer-events-none absolute right-4 top-4 z-20 max-w-[14rem] text-right text-[10px] text-white/30">
         v1 mock SSE · not real model activations
+        <br />
+        under-membrane view · overshoot = up
       </footer>
     </div>
   );

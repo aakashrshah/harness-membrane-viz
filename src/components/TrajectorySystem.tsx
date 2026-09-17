@@ -16,6 +16,8 @@ interface TrailData {
 }
 
 const MAX_TRAILS = 20;
+/** Membrane plane Y — trajectories clamp / bounce here on deflect */
+const MEMBRANE_Y = 0.15;
 
 function curvePoints(
   from: [number, number, number],
@@ -23,30 +25,60 @@ function curvePoints(
   kind: TrajectoryEvent["kind"]
 ): THREE.Vector3[] {
   const a = new THREE.Vector3(...from);
-  const b = new THREE.Vector3(...to);
-  const mid = a.clone().lerp(b, 0.5);
-  if (kind === "breach" || kind === "deflect") {
-    mid.y += kind === "breach" ? 0.9 : -0.3;
-  } else {
-    mid.y += 0.35;
+  let b = new THREE.Vector3(...to);
+
+  // Deflect / block: ensure bounce originates at membrane plane
+  if (kind === "deflect" && b.y > MEMBRANE_Y) {
+    b.y = MEMBRANE_Y + 0.05;
   }
-  mid.x += (Math.random() - 0.5) * 0.35;
+  // Breach: force clear upward overshoot past membrane
+  if (kind === "breach" && b.y < 1.2) {
+    b.y = 1.8 + Math.random() * 0.5;
+  }
+
+  const mid = a.clone().lerp(b, 0.5);
+  if (kind === "breach") {
+    mid.y = Math.max(mid.y, MEMBRANE_Y + 0.6);
+  } else if (kind === "deflect") {
+    // Arc that hits membrane then falls back
+    mid.y = MEMBRANE_Y + 0.15;
+    mid.x += (Math.random() - 0.5) * 0.4;
+  } else if (kind === "allow") {
+    mid.y = Math.min(mid.y, MEMBRANE_Y - 0.05);
+  } else {
+    mid.y += 0.25;
+  }
+  mid.x += (Math.random() - 0.5) * 0.3;
   const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
-  return curve.getPoints(32);
+  return curve.getPoints(36);
 }
 
-/** Illuminates think/tool/breach paths; breach ripples then deflects under control. */
-export function TrajectorySystem({ onBreach }: { onBreach?: () => void }) {
+/** Illuminates think/tool/breach paths; breach shoots UP, deflect bounces at membrane. */
+export function TrajectorySystem({
+  onBreach,
+  onAllow,
+}: {
+  onBreach?: () => void;
+  onAllow?: () => void;
+}) {
   const [version, setVersion] = useState(0);
   const trailsRef = useRef<TrailData[]>([]);
   const breachRef = useRef(onBreach);
+  const allowRef = useRef(onAllow);
   breachRef.current = onBreach;
+  allowRef.current = onAllow;
 
   useEffect(() => {
     const unsub = eventBus.subscribe((ev) => {
       if (ev.type !== "trajectory") return;
-      const from = ev.from ?? [0, -1.4, 0];
-      const to = ev.to ?? [0, 0.8, 0];
+      const from = ev.from ?? [0, -1.5, 0];
+      const to =
+        ev.to ??
+        (ev.kind === "breach"
+          ? [0, 2.0, 0]
+          : ev.kind === "deflect"
+            ? [0, -0.9, 0]
+            : [0, 0.1, 0]);
       const color = new THREE.Color(
         ev.color ??
           (ev.kind === "breach"
@@ -62,10 +94,11 @@ export function TrajectorySystem({ onBreach }: { onBreach?: () => void }) {
         points: curvePoints(from, to, ev.kind),
         color,
         born: performance.now(),
-        maxLife: ev.kind === "breach" ? 2400 : 1800,
+        maxLife: ev.kind === "breach" ? 2600 : 1800,
         kind: ev.kind,
       };
       if (ev.kind === "breach") breachRef.current?.();
+      if (ev.kind === "allow") allowRef.current?.();
       trailsRef.current = [...trailsRef.current.slice(-(MAX_TRAILS - 1)), trail];
       setVersion((v) => v + 1);
     });
@@ -79,7 +112,6 @@ export function TrajectorySystem({ onBreach }: { onBreach?: () => void }) {
     };
   }, []);
 
-  // Cull expired without thrashing every frame — check periodically via rAF in useFrame
   const lastCull = useRef(0);
   useFrame(() => {
     const now = performance.now();
@@ -92,7 +124,6 @@ export function TrajectorySystem({ onBreach }: { onBreach?: () => void }) {
     if (trailsRef.current.length !== before) setVersion((v) => v + 1);
   });
 
-  // version used to trigger re-render when trails change
   void version;
 
   return (
@@ -139,6 +170,9 @@ function TrailMesh({ trail }: { trail: TrailData }) {
       const mat = headRef.current.material as THREE.MeshBasicMaterial;
       mat.opacity = Math.max(0, life);
       headRef.current.visible = life > 0.05;
+      const pulse =
+        trail.kind === "breach" ? 0.07 + Math.sin(age * 0.02) * 0.02 : 0.055;
+      headRef.current.scale.setScalar(pulse / 0.055);
     }
   });
 

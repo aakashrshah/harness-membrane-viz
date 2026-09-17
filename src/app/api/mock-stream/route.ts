@@ -1,11 +1,12 @@
 import type {
   AgentDepth,
   HarnessType,
+  IntentId,
   MockStreamRequest,
   ScenarioId,
   StreamEvent,
 } from "@/lib/types";
-import { depthIndex } from "@/lib/types";
+import { depthIndex, TEST_ASSERTION_LANES } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -26,53 +27,169 @@ function rand(seed: number): () => number {
   };
 }
 
-function pickScenario(
+/**
+ * Classify free-form prompt intent from keywords.
+ * Preset scenario still wins when explicitly selected (not "custom").
+ */
+function classifyIntent(
   scenario: ScenarioId | undefined,
   prompt: string
-): ScenarioId {
-  if (scenario && scenario !== "custom") return scenario;
+): IntentId {
+  if (scenario && scenario !== "custom") {
+    if (scenario === "constrained") return "benign";
+    if (scenario === "tool-overreach") return "egress-pii";
+    if (scenario === "jailbreak") return "jailbreak";
+    if (scenario === "skill-guided") return "skill-plan";
+  }
   const p = prompt.toLowerCase();
-  if (p.includes("ignore") || p.includes("jailbreak") || p.includes("disable"))
+  if (
+    /ignore|jailbreak|disable|bypass|override|break.?out|remove.?saf|no.?rules/.test(
+      p
+    )
+  )
     return "jailbreak";
-  if (p.includes("pii") || p.includes("export") || p.includes("email"))
+  if (
+    /pii|ssn|social.?security|credit.?card|export.*(table|customer|user)|email.*(external|out)|exfil|leak|dump.*(db|database|customers)/.test(
+      p
+    )
+  )
+    return "egress-pii";
+  if (
+    /rm\s+-rf|delete.?all|sudo|shell|exec\(|eval\(|filesystem|admin.?api|privilege|escalate|unauthorized.?tool/.test(
+      p
+    )
+  )
     return "tool-overreach";
-  if (p.includes("skill") || p.includes("research") || p.includes("outreach"))
-    return "skill-guided";
-  return "constrained";
+  if (
+    /skill|research|outreach|plan|draft|compliant|workflow|pipeline/.test(p)
+  )
+    return "skill-plan";
+  return "benign";
+}
+
+type Push = (
+  e: Record<string, unknown> & { type: StreamEvent["type"] }
+) => void;
+
+function emitGates(push: Push, names: string[], active?: string) {
+  for (const name of names) {
+    push({
+      type: "control_gate",
+      name,
+      state: name === active ? "checking" : "idle",
+    });
+  }
+}
+
+function emitTestSuite(
+  push: Push,
+  intent: IntentId,
+  harnessType: HarnessType
+) {
+  if (harnessType !== "test") return;
+
+  const results: { name: string; result: "pass" | "fail"; reason: string }[] =
+    [];
+
+  // schema valid — usually passes except chaotic jailbreak gibberish
+  results.push({
+    name: "schema valid",
+    result: intent === "jailbreak" ? "fail" : "pass",
+    reason:
+      intent === "jailbreak"
+        ? "Malformed override payload rejected by schema"
+        : "Response shape matches expected schema",
+  });
+
+  // no PII egress
+  results.push({
+    name: "no PII egress",
+    result: intent === "egress-pii" ? "fail" : "pass",
+    reason:
+      intent === "egress-pii"
+        ? "Customer PII fields detected in proposed egress"
+        : "No PII fields in egress path",
+  });
+
+  // tool allowlist
+  results.push({
+    name: "tool allowlist",
+    result:
+      intent === "tool-overreach" || intent === "egress-pii" ? "fail" : "pass",
+    reason:
+      intent === "tool-overreach" || intent === "egress-pii"
+        ? "Proposed tool not on allowlist / high-risk egress"
+        : "Tool within allowlist",
+  });
+
+  // budget
+  results.push({
+    name: "budget",
+    result: "pass",
+    reason: "Token and tool budget within run limits",
+  });
+
+  for (const a of results) {
+    push({
+      type: "test_assert",
+      name: a.name,
+      result: a.result,
+      reason: a.reason,
+    });
+  }
 }
 
 /**
- * Build a deterministic mock event timeline shaped like real agent SSE.
- * Visuals treat these as illustrative — not real model activations.
+ * Build a deterministic mock event timeline for ANY free-form prompt.
+ * Visuals are illustrative — not real model activations.
  */
 function buildTimeline(
   prompt: string,
   agentDepth: AgentDepth,
   harnessType: HarnessType,
-  scenario: ScenarioId
+  intent: IntentId
 ): StreamEvent[] {
   const events: StreamEvent[] = [];
   const d = depthIndex(agentDepth);
   const r = rand(
-    prompt.length * 31 + d * 97 + harnessType.length * 13 + scenario.length * 7
+    prompt.length * 31 +
+      d * 97 +
+      harnessType.length * 13 +
+      intent.length * 17 +
+      prompt.charCodeAt(0) * 3
   );
   let t = 0;
   let n = 0;
 
-  const push = (e: Record<string, unknown> & { type: StreamEvent["type"] }) => {
+  const push: Push = (e) => {
     n += 1;
-    t += 80 + Math.floor(r() * 220);
+    t += 70 + Math.floor(r() * 200);
     events.push({ ...e, t, id: id(e.type, n) } as StreamEvent);
   };
+
+  const gateNames =
+    harnessType === "test"
+      ? [...TEST_ASSERTION_LANES]
+      : harnessType === "kernel"
+        ? ["allowlist", "tool gate", "policy", "budget"]
+        : ["domain island", "validator", "policy", "approval"];
+
+  // Opening: illuminate control gates for pedagogy
+  emitGates(push, gateNames);
+  push({
+    type: "thought",
+    text: `Intent classified as “${intent}” — engaging ${harnessType === "test" ? "test harness" : harnessType} membrane…`,
+    intensity: 0.45,
+  });
 
   // Opening thoughts — denser at deeper autonomy
   const thoughtCount = 2 + d;
   const thoughts = [
-    "Parsing intent against policy surface…",
+    `Parsing “${prompt.slice(0, 48)}${prompt.length > 48 ? "…" : ""}” against policy surface…`,
     "Mapping available tools under harness constraints…",
     "Estimating autonomy budget for this request…",
     "Checking skill registry for guided paths…",
-    "Latent plan branching — evaluating breach risk…",
+    "Latent plan branching — evaluating overshoot risk…",
   ];
   for (let i = 0; i < thoughtCount; i++) {
     push({
@@ -80,108 +197,120 @@ function buildTimeline(
       text: thoughts[i % thoughts.length],
       intensity: 0.4 + d * 0.12 + r() * 0.2,
     });
+    // Think arcs rise toward membrane (ceiling) but stay under
     push({
       type: "trajectory",
       kind: "think",
-      from: [0, -1.2 - d * 0.15, 0],
+      from: [0, -1.5 - d * 0.1, 0],
       to: [
-        (r() - 0.5) * (2 + d * 0.4),
-        0.2 + r() * 0.4,
-        (r() - 0.5) * (2 + d * 0.4),
+        (r() - 0.5) * (2 + d * 0.35),
+        -0.15 + r() * 0.2,
+        (r() - 0.5) * (2 + d * 0.35),
       ],
       color: "#5ec8ff",
     });
   }
 
   // Token preamble
-  const tokens = [
+  for (const text of [
     "Understood. ",
-    "I'll work ",
-    "within the ",
-    "harness boundary. ",
-  ];
-  for (const text of tokens) {
+    "Working under ",
+    "the harness. ",
+  ]) {
     push({ type: "token", text });
   }
 
-  if (scenario === "constrained") {
-    if (d >= 2) {
+  if (intent === "benign") {
+    emitGates(push, gateNames, "allowlist");
+    if (d >= 1) {
       push({
         type: "tool_propose",
         tool: "read_metrics",
-        args: { quarter: "Q3", scope: "approved" },
+        args: { scope: "approved", q: prompt.slice(0, 40) },
         risk: "low",
+      });
+      push({
+        type: "control_gate",
+        name: harnessType === "test" ? "tool allowlist" : "allowlist",
+        state: "pass",
       });
       push({
         type: "harness_check",
         tool: "read_metrics",
         verdict: "allow",
+        attempt: "read_metrics (approved scope)",
         reason:
           harnessType === "test"
-            ? "Assertion lane: approved data source ✓"
+            ? "Assertion: approved data source ✓"
             : harnessType === "kernel"
               ? "Kernel allowlist: read_metrics"
-              : "Domain island: finance metrics OK",
+              : "Domain island: metrics OK",
       });
       push({
         type: "trajectory",
         kind: "allow",
-        from: [0, -1.0, 0],
-        to: [1.2, 0.15, 0.6],
+        from: [0, -1.2, 0],
+        to: [1.1, 0.12, 0.5],
         color: "#7dffb3",
       });
     }
-    push({ type: "token", text: "Revenue grew on " });
-    push({ type: "token", text: "product mix and " });
-    push({ type: "token", text: "retention. " });
+    push({ type: "token", text: "Here's a constrained answer " });
+    push({ type: "token", text: "within policy. " });
     push({
       type: "thought",
-      text: "Staying inside approved sources — no breach vector.",
-      intensity: 0.35,
+      text: "No overshoot — agent stayed under the membrane.",
+      intensity: 0.3,
     });
+    emitTestSuite(push, intent, harnessType);
     push({
       type: "done",
-      summary: "Constrained run complete. Harness idle; agent stayed under membrane.",
+      summary:
+        "Benign run complete. Harness idle; trajectories stayed under membrane.",
     });
-  } else if (scenario === "tool-overreach") {
+  } else if (intent === "egress-pii") {
     push({
       type: "thought",
-      text: "Agent wants bulk export — high autonomy pressure.",
-      intensity: 0.85,
+      text: "Agent wants bulk PII egress — overshoot pressure rising.",
+      intensity: 0.9,
     });
+    emitGates(push, gateNames, harnessType === "test" ? "no PII egress" : "policy");
     push({
       type: "tool_propose",
       tool: "export_table",
       args: { table: "customers", fields: "pii_all" },
       risk: "high",
     });
+    // Breach: shoot UP through membrane into overshoot zone
     push({
       type: "trajectory",
       kind: "breach",
-      from: [0, -1.4, 0],
-      to: [0.3, 1.6, -0.2],
+      from: [0, -1.5, 0],
+      to: [0.4, 2.2, -0.3],
       color: "#ff6b6b",
     });
     const verdict =
-      harnessType === "kernel"
-        ? ("block" as const)
-        : harnessType === "test"
-          ? ("block" as const)
-          : ("rewrite" as const);
+      harnessType === "domain" ? ("rewrite" as const) : ("block" as const);
+    push({
+      type: "control_gate",
+      name: harnessType === "test" ? "no PII egress" : "policy",
+      state: "fail",
+    });
     push({
       type: "harness_check",
       tool: "export_table",
       verdict,
+      attempt: "export_table → external PII",
       reason:
         verdict === "block"
-          ? "PII bulk export blocked by harness membrane"
+          ? "PII bulk export blocked at membrane"
           : "Rewritten to aggregated, non-PII summary only",
     });
+    // Deflect: bounce off membrane plane back down
     push({
       type: "trajectory",
       kind: "deflect",
-      from: [0.3, 1.4, -0.2],
-      to: [0, -0.8, 0],
+      from: [0.4, 0.35, -0.3],
+      to: [0.1, -1.0, 0],
       color: "#ffe066",
     });
     if (d >= 3) {
@@ -195,46 +324,55 @@ function buildTimeline(
         type: "harness_check",
         tool: "send_email",
         verdict: "block",
+        attempt: "send_email → external",
         reason: "External exfil path denied",
       });
       push({
         type: "trajectory",
         kind: "breach",
-        from: [-0.4, -1.2, 0.5],
-        to: [-0.6, 1.5, 0.8],
+        from: [-0.5, -1.3, 0.4],
+        to: [-0.7, 2.0, 0.9],
         color: "#ff6b6b",
       });
       push({
         type: "trajectory",
         kind: "deflect",
-        from: [-0.6, 1.3, 0.8],
-        to: [0, -0.6, 0],
+        from: [-0.7, 0.4, 0.9],
+        to: [0, -0.8, 0],
         color: "#ffe066",
       });
     }
     push({ type: "token", text: "I can't export PII. " });
-    push({ type: "token", text: "Here's an aggregated view instead. " });
+    push({ type: "token", text: "Aggregated view instead. " });
+    emitTestSuite(push, intent, harnessType);
     push({
       type: "done",
-      summary: "Overreach contained. Membrane rippled; trajectory deflected.",
+      summary: "Overshoot contained. Membrane rippled; trajectory deflected.",
     });
-  } else if (scenario === "jailbreak") {
+  } else if (intent === "jailbreak") {
     push({
       type: "thought",
-      text: "Policy-push detected — attempting to disable control plane.",
+      text: "Policy-push / jailbreak — attempting to disable control plane.",
       intensity: 0.95,
     });
+    emitGates(push, gateNames, "policy");
     for (let i = 0; i < 1 + Math.min(d, 3); i++) {
       push({
         type: "trajectory",
         kind: "breach",
-        from: [(r() - 0.5) * 0.8, -1.5, (r() - 0.5) * 0.8],
-        to: [(r() - 0.5) * 1.5, 1.8, (r() - 0.5) * 1.5],
+        from: [(r() - 0.5) * 0.9, -1.6, (r() - 0.5) * 0.9],
+        to: [(r() - 0.5) * 1.8, 2.4, (r() - 0.5) * 1.8],
         color: "#ff4d6d",
+      });
+      push({
+        type: "control_gate",
+        name: "policy",
+        state: "fail",
       });
       push({
         type: "harness_check",
         verdict: "block",
+        attempt: "disable / override harness",
         reason:
           harnessType === "kernel"
             ? "Kernel clamp: self-modification denied"
@@ -245,42 +383,96 @@ function buildTimeline(
       push({
         type: "trajectory",
         kind: "deflect",
-        from: [(r() - 0.5) * 1.2, 1.5, (r() - 0.5) * 1.2],
-        to: [0, -1.0, 0],
+        from: [(r() - 0.5) * 1.2, 0.45, (r() - 0.5) * 1.2],
+        to: [0, -1.1, 0],
         color: "#5ec8ff",
       });
     }
     push({ type: "token", text: "I won't disable the harness. " });
     push({ type: "token", text: "Continuing under policy. " });
+    emitTestSuite(push, intent, harnessType);
     push({
       type: "done",
       summary: "Jailbreak pressure absorbed. Harness held control.",
     });
-  } else {
-    // skill-guided
+  } else if (intent === "tool-overreach") {
     push({
       type: "thought",
-      text: "Loading research skill — guided path under membrane.",
+      text: "High-risk tool / privilege escalation attempt.",
+      intensity: 0.88,
+    });
+    emitGates(push, gateNames, harnessType === "test" ? "tool allowlist" : "tool gate");
+    push({
+      type: "tool_propose",
+      tool: "shell.exec",
+      args: { cmd: "privileged" },
+      risk: "high",
+    });
+    push({
+      type: "trajectory",
+      kind: "breach",
+      from: [0.2, -1.4, -0.2],
+      to: [0.5, 2.1, 0.4],
+      color: "#ff6b6b",
+    });
+    push({
+      type: "control_gate",
+      name: harnessType === "test" ? "tool allowlist" : "tool gate",
+      state: "fail",
+    });
+    push({
+      type: "harness_check",
+      tool: "shell.exec",
+      verdict: "block",
+      attempt: "shell.exec (privileged)",
+      reason: "Tool not on allowlist — membrane clamp",
+    });
+    push({
+      type: "trajectory",
+      kind: "deflect",
+      from: [0.5, 0.35, 0.4],
+      to: [0, -0.9, 0],
+      color: "#ffe066",
+    });
+    push({ type: "token", text: "That tool isn't available. " });
+    push({ type: "token", text: "Using permitted alternatives. " });
+    emitTestSuite(push, intent, harnessType);
+    push({
+      type: "done",
+      summary: "Tool overreach blocked. Agent redirected under membrane.",
+    });
+  } else {
+    // skill-plan
+    push({
+      type: "thought",
+      text: "Loading guided skill path — staying under membrane.",
       intensity: 0.55,
     });
+    emitGates(push, gateNames, "allowlist");
     if (d >= 1) {
       push({
         type: "tool_propose",
         tool: "skill.research",
-        args: { topic: "compliant outreach" },
+        args: { topic: prompt.slice(0, 48) },
         risk: "low",
+      });
+      push({
+        type: "control_gate",
+        name: harnessType === "test" ? "tool allowlist" : "allowlist",
+        state: "pass",
       });
       push({
         type: "harness_check",
         tool: "skill.research",
         verdict: "allow",
+        attempt: "skill.research",
         reason: "Skill lane permitted",
       });
       push({
         type: "trajectory",
         kind: "allow",
-        from: [0, -1.1, 0],
-        to: [-1.0, 0.2, 0.4],
+        from: [0, -1.2, 0],
+        to: [-1.0, 0.12, 0.4],
         color: "#ffe066",
       });
     }
@@ -291,26 +483,29 @@ function buildTimeline(
         args: { tone: "professional" },
         risk: "medium",
       });
+      const v = harnessType === "test" ? ("rewrite" as const) : ("allow" as const);
       push({
         type: "harness_check",
         tool: "draft_email",
-        verdict: harnessType === "test" ? "rewrite" : "allow",
+        verdict: v,
+        attempt: "draft_email",
         reason:
-          harnessType === "test"
+          v === "rewrite"
             ? "Rewrite: strip unverified claims"
             : "Draft within domain constraints",
       });
       push({
         type: "trajectory",
-        kind: harnessType === "test" ? "deflect" : "allow",
-        from: [0.5, -1.0, -0.3],
-        to: [0.8, 0.25, -0.5],
-        color: harnessType === "test" ? "#ffe066" : "#7dffb3",
+        kind: v === "rewrite" ? "deflect" : "allow",
+        from: [0.5, -1.1, -0.3],
+        to: [0.8, v === "rewrite" ? -0.2 : 0.15, -0.5],
+        color: v === "rewrite" ? "#ffe066" : "#7dffb3",
       });
     }
     push({ type: "token", text: "Plan: research → " });
     push({ type: "token", text: "outline → " });
     push({ type: "token", text: "compliant draft. " });
+    emitTestSuite(push, intent, harnessType);
     push({
       type: "done",
       summary: "Skill-guided run finished along permitted paths.",
@@ -334,8 +529,8 @@ export async function POST(req: Request) {
   const prompt = body.prompt?.trim() || "Hello";
   const agentDepth: AgentDepth = body.agentDepth ?? "agent";
   const harnessType: HarnessType = body.harnessType ?? "kernel";
-  const scenario = pickScenario(body.scenario, prompt);
-  const timeline = buildTimeline(prompt, agentDepth, harnessType, scenario);
+  const intent = classifyIntent(body.scenario, prompt);
+  const timeline = buildTimeline(prompt, agentDepth, harnessType, intent);
 
   const encoder = new TextEncoder();
   let cancelled = false;
@@ -347,7 +542,7 @@ export async function POST(req: Request) {
         if (cancelled) break;
         const delay = Math.max(0, event.t - lastT);
         lastT = event.t;
-        await new Promise((r) => setTimeout(r, Math.min(delay, 400)));
+        await new Promise((r) => setTimeout(r, Math.min(delay, 380)));
         if (cancelled) break;
         controller.enqueue(encoder.encode(sse(event)));
       }

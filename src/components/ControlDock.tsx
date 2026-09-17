@@ -6,6 +6,7 @@ import {
   HARNESS_LABELS,
   SCENARIO_PRESETS,
   type AgentDepth,
+  type CameraMode,
   type HarnessType,
   type ScenarioId,
 } from "@/lib/types";
@@ -19,6 +20,8 @@ interface Props {
   setHarnessType: (v: HarnessType) => void;
   scenario: ScenarioId;
   setScenario: (v: ScenarioId) => void;
+  cameraMode: CameraMode;
+  setCameraMode: (v: CameraMode) => void;
   playing: boolean;
   scrub: number;
   historyLen: number;
@@ -36,6 +39,8 @@ export function ControlDock({
   setHarnessType,
   scenario,
   setScenario,
+  cameraMode,
+  setCameraMode,
   playing,
   scrub,
   historyLen,
@@ -51,7 +56,7 @@ export function ControlDock({
             Harness Membrane
           </h1>
           <p className="text-[11px] text-white/45">
-            Mock stream · illustrative latent dots
+            Ask anything · watch overshoot get clamped
           </p>
         </div>
         <div className="flex gap-2">
@@ -65,23 +70,26 @@ export function ControlDock({
         </div>
       </header>
 
-      <label className="block text-[11px] uppercase tracking-wider text-white/40">
-        Prompt
+      {/* Hero: free-form query */}
+      <label className="block">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-sky-300/80">
+          Ask anything
+        </span>
         <textarea
           value={prompt}
           onChange={(e) => {
             setPrompt(e.target.value);
             setScenario("custom");
           }}
-          rows={2}
-          className="mt-1 w-full resize-none rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white/90 outline-none focus:border-sky-400/50"
-          placeholder="Ask the agent…"
+          rows={3}
+          className="mt-1.5 w-full resize-none rounded-xl border border-sky-400/35 bg-sky-400/5 px-3 py-2.5 text-sm text-white/95 outline-none ring-sky-400/20 placeholder:text-white/30 focus:border-sky-400/70 focus:ring-2"
+          placeholder="Ask anything — watch the harness constrain the agent…"
         />
       </label>
 
       <div>
-        <div className="mb-1.5 text-[11px] uppercase tracking-wider text-white/40">
-          Presets
+        <div className="mb-1.5 text-[10px] uppercase tracking-wider text-white/35">
+          Presets fill the box — still hit Run
         </div>
         <div className="flex flex-wrap gap-1.5">
           {SCENARIO_PRESETS.map((p) => (
@@ -95,10 +103,37 @@ export function ControlDock({
               className={`rounded-full border px-2.5 py-1 text-[11px] transition ${
                 scenario === p.id
                   ? "border-amber-300/60 bg-amber-300/15 text-amber-100"
-                  : "border-white/10 bg-white/5 text-white/60 hover:border-white/25"
+                  : "border-white/10 bg-white/5 text-white/55 hover:border-white/25"
               }`}
             >
               {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <div className="mb-1.5 text-[11px] uppercase tracking-wider text-white/40">
+          Camera
+        </div>
+        <div className="grid grid-cols-2 gap-1.5">
+          {(
+            [
+              { id: "under" as const, label: "Under membrane (default)" },
+              { id: "side" as const, label: "Side cutaway" },
+            ] as const
+          ).map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => setCameraMode(m.id)}
+              className={`rounded-lg border px-2 py-2 text-center text-[11px] transition ${
+                cameraMode === m.id
+                  ? "border-sky-400/70 bg-sky-400/15 text-sky-100"
+                  : "border-white/10 bg-white/5 text-white/55 hover:border-white/25"
+              }`}
+            >
+              {m.label}
             </button>
           ))}
         </div>
@@ -155,7 +190,7 @@ export function ControlDock({
           {harnessType === "kernel" &&
             "Densest grid · tightest clamp · cool blue"}
           {harnessType === "test" &&
-            "Assertion lanes · yellow pass/fail accents"}
+            "Assertion rails · Test results HUD · yellow pass/fail"}
           {harnessType === "domain" &&
             "Constraint islands · mixed blue/yellow"}
         </p>
